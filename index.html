@@ -4,19 +4,47 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width">
   <title>Water Quest</title>
+  <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800&display=swap" rel="stylesheet">
   <link href="style.css" rel="stylesheet" type="text/css" />
 </head>
 <body>
   <div class="container">
-    <h1>Water Quest</h1>
-    <p class="game-instructions">Collect 20 items to complete the game!</p>
-    <div class="stats">
-      <p>Cans Collected: <span id="current-cans">0</span></p>
-      <p>Time Left: <span id="timer">30</span>s</p>
+    <header class="site-header">
+      <img src="img/cw_logo.png" alt="charity: water logo" class="logo">
+      <h1>Water Quest</h1>
+    </header>
+
+    <div class="meta-panel">
+      <div class="score">Score: <span id="current-cans">0</span></div>
+      <div class="timer">Time: <span id="timer">60</span>s</div>
+      <button id="start-game" class="cta">Lets Play!</button>
     </div>
+
     <div id="achievements" class="achievement"></div>
-    <div class="game-grid"></div>
-    <button id="start-game">Start Game</button>
+    <div class="game-grid" role="grid" aria-label="game grid"></div>
+
+    <div class="donation-row">
+      <div class="donation-badge">0</div>
+      <p class="donation-text">Every $40 can bring clean water to one person.</p>
+      <div class="donation-details">Raised: $<span id="dollars">0</span></div>
+      <div class="donation-total">All-time raised: $<span id="total-dollars">0</span></div>
+      <button id="reset-total" class="small">Reset all-time total</button>
+    </div>
+
+    <!-- Announcer for screen readers -->
+    <div id="announcer" class="visually-hidden" aria-live="polite"></div>
+
+    <footer class="brand-block">
+      <div class="brand-name">charity: water</div>
+    </footer>
+    <!-- Victory modal -->
+    <div id="victory-modal" class="modal" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal-content">
+        <h2>Congratulations!</h2>
+        <p>You collected <span id="final-count">0</span> items and raised $<span id="final-dollars">0</span>.</p>
+        <button id="modal-restart">Play again</button>
+      </div>
+    </div>
   </div>
   <script src="script.js"></script>
 </body>
