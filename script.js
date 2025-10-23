@@ -150,8 +150,15 @@ function playSound(name) {
 // Increment score and clear the current water can
 function collectCan(target) {
   // Locate the wrapper and image but don't remove immediately so we can show animations
-  const wrapper = target.closest('.water-can-wrapper');
-  const cell = target.closest('.grid-cell');
+  // normalize target to the actual image element if possible
+  let imgEl = target;
+  if (!imgEl || !imgEl.classList || !imgEl.classList.contains('water-can')) {
+    const byClosest = target.closest && target.closest('.water-can');
+    imgEl = byClosest || (target.closest ? (target.closest('.grid-cell') ? target.closest('.grid-cell').querySelector('.water-can') : null) : null);
+  }
+  if (!imgEl) return; // nothing clickable
+  const wrapper = imgEl.closest('.water-can-wrapper');
+  const cell = imgEl.closest('.grid-cell');
 
   // increment collected cans and update display
   currentCans += 1;
@@ -159,16 +166,25 @@ function collectCan(target) {
   if (currentEl) currentEl.textContent = currentCans;
 
   // determine clicked can's value (data-value on the image)
-  const clickedValue = parseFloat(target.dataset && target.dataset.value) || parseFloat(target.getAttribute('data-value')) || 1;
+  // determine clicked can's value (prefer dataset)
+  const rawVal = (imgEl.dataset && imgEl.dataset.value) || imgEl.getAttribute && imgEl.getAttribute('data-value');
+  const clickedValue = Number(rawVal) || 1;
 
-  // update session dollars and UI
+  // compute previous people helped and update session dollars
+  const prevPeople = Math.floor(sessionDollars / 40);
   sessionDollars = Math.round((sessionDollars + clickedValue) * 100) / 100;
   const dollarsEl = document.getElementById('dollars');
   if (dollarsEl) dollarsEl.textContent = sessionDollars;
 
-  // update the donation badge (people helped) based on session total
-  const people = Math.floor(sessionDollars / 40);
-  updateBadge(people);
+  // update the donation badge only if we've crossed the next $40 threshold
+  const newPeople = Math.floor(sessionDollars / 40);
+  if (newPeople > prevPeople) {
+    updateBadge(newPeople);
+  } else {
+    // keep the badge number accurate without re-triggering the pop animation
+    const badge = document.querySelector('.donation-badge');
+    if (badge) badge.textContent = newPeople;
+  }
 
   // persist to all-time total using clicked value
   const addValue = clickedValue || 1;
@@ -278,6 +294,59 @@ function endGame() {
   // Change CTA to allow restart
   const btn = document.getElementById('start-game');
   if (btn) btn.textContent = 'Play again';
+}
+
+// Pause / Resume / Restart helpers
+let paused = false;
+let remainingTimeWhenPaused = null;
+
+function pauseGame() {
+  if (!gameActive || paused) return;
+  paused = true;
+  // stop spawning and timer
+  clearInterval(spawnInterval);
+  clearInterval(countdownInterval);
+  // compute remaining time
+  const tEl = document.getElementById('timer');
+  remainingTimeWhenPaused = tEl ? parseInt(tEl.textContent, 10) : timeLeft;
+  // update UI
+  const pBtn = document.getElementById('pause-game');
+  if (pBtn) { pBtn.textContent = 'Resume'; pBtn.setAttribute('aria-pressed', 'true'); }
+}
+
+function resumeGame() {
+  if (!gameActive || !paused) return;
+  paused = false;
+  // restore timer
+  timeLeft = (remainingTimeWhenPaused != null) ? remainingTimeWhenPaused : timeLeft;
+  const tEl = document.getElementById('timer');
+  if (tEl) tEl.textContent = timeLeft;
+  // restart intervals
+  spawnInterval = setInterval(spawnWaterCan, 900);
+  countdownInterval = setInterval(() => {
+    timeLeft -= 1;
+    const te = document.getElementById('timer'); if (te) te.textContent = timeLeft;
+    if (timeLeft <= 0) { endGame(); showVictory(); }
+  }, 1000);
+  const pBtn = document.getElementById('pause-game');
+  if (pBtn) { pBtn.textContent = 'Pause'; pBtn.setAttribute('aria-pressed', 'false'); }
+}
+
+function restartGame() {
+  // reset session but keep totalDollars persisted
+  // stop any running intervals
+  clearInterval(spawnInterval); clearInterval(countdownInterval);
+  paused = false;
+  gameActive = false;
+  // reset session state
+  currentCans = 0; sessionDollars = 0; timeLeft = 60; remainingTimeWhenPaused = null;
+  // update UI
+  const currentEl = document.getElementById('current-cans'); if (currentEl) currentEl.textContent = currentCans;
+  const dollarsEl = document.getElementById('dollars'); if (dollarsEl) dollarsEl.textContent = sessionDollars;
+  const timerEl = document.getElementById('timer'); if (timerEl) timerEl.textContent = timeLeft;
+  updateBadge(0);
+  // start fresh
+  startGame();
 }
 
 // Victory modal handlers
@@ -423,12 +492,28 @@ document.getElementById('start-game').addEventListener('click', () => {
   }
 });
 
+// pause button
+const pauseBtn = document.getElementById('pause-game');
+if (pauseBtn) {
+  pauseBtn.addEventListener('click', () => {
+    if (!gameActive) return;
+    if (!paused) pauseGame(); else resumeGame();
+  });
+}
+
+// restart button
+const restartBtn = document.getElementById('restart-game');
+if (restartBtn) {
+  restartBtn.addEventListener('click', () => {
+    restartGame();
+  });
+}
+
 // Delegate clicks inside the grid to handle collecting cans
 document.querySelector('.game-grid').addEventListener('click', (e) => {
   if (!gameActive) return;
-  if (e.target.closest('.water-can')) {
-    collectCan(e.target);
-  }
+  const can = e.target.closest('.water-can');
+  if (can) collectCan(can);
 });
 
 // modal restart button

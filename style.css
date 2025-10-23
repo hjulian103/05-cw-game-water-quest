@@ -430,3 +430,29 @@ button {
   .meta-panel { padding: 10px; grid-template-columns: 1fr 1fr; }
   .meta-panel .cta { font-size: 16px; padding: 12px; }
 }
+
+/* Medium screens: tablets and small laptops */
+@media (max-width: 900px) {
+  .container { padding: 28px; max-width: 680px; }
+  .game-grid { grid-template-columns: repeat(3, 1fr); gap: 12px; max-width: 520px; }
+  .water-can-wrapper { width: 60px; height: 60px; }
+  .water-can { width: 56px; height: 56px; }
+  .meta-panel { max-width: 560px; grid-template-columns: 1fr 1fr; padding: 10px; }
+  .meta-panel .cta { padding: 12px 14px; font-size: 16px; }
+  .donation-row { flex-wrap: wrap; gap: 10px; }
+}
+
+/* Small screens: phones */
+@media (max-width: 600px) {
+  body { padding: 12px; }
+  .container { padding: 18px; margin: 14px auto; }
+  .game-grid { grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 360px; }
+  .grid-cell { border-radius: 10px; }
+  .water-can-wrapper { width: 52px; height: 52px; }
+  .water-can { width: 48px; height: 48px; }
+  .meta-panel { grid-template-columns: 1fr; gap: 8px; padding: 8px; }
+  .meta-panel .cta { grid-column: 1 / -1; font-size: 15px; padding: 10px; }
+  .donation-row { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .donation-text { font-size: 14px; }
+  .donation-badge { padding: 8px 10px; min-width: 38px; }
+}

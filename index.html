@@ -17,7 +17,11 @@
     <div class="meta-panel">
       <div class="score">Score: <span id="current-cans">0</span></div>
       <div class="timer">Time: <span id="timer">60</span>s</div>
-      <button id="start-game" class="cta">Lets Play!</button>
+       <div style="grid-column: 1 / -1; display:flex; gap:8px; justify-content:center;">
+         <button id="start-game" class="cta">Lets Play!</button>
+         <button id="pause-game" class="small" aria-pressed="false">Pause</button>
+         <button id="restart-game" class="small">Restart</button>
+       </div>
     </div>
 
     <div id="achievements" class="achievement"></div>
