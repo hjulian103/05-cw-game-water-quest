@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width">
   <title>Water Quest</title>
   <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <!-- Bootstrap CSS (for button styles and helpers) -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-9ndCyUa6mY5QvM7j2QYbV3QKZsQ1Ylq1gqE3sXG6rVQG5m9G6Z7m5g5b6G5Q4h2Q" crossorigin="anonymous">
   <link href="style.css" rel="stylesheet" type="text/css" />
 </head>
 <body>
@@ -17,36 +19,96 @@
     <div class="meta-panel">
       <div class="score">Score: <span id="current-cans">0</span></div>
       <div class="timer">Time: <span id="timer">60</span>s</div>
-       <div style="grid-column: 1 / -1; display:flex; gap:8px; justify-content:center;">
-         <button id="start-game" class="cta">Lets Play!</button>
-         <button id="pause-game" class="small" aria-pressed="false">Pause</button>
-         <button id="restart-game" class="small">Restart</button>
+    <div class="meta-controls" style="grid-column: 1 / -1; display:flex; gap:8px; justify-content:center;">
+    <button id="start-game" class="btn btn-primary cta">Lets Play!</button>
+     <label for="difficulty-select" style="align-self:center; margin-left:8px; font-weight:600; color:#0F2434;">Difficulty</label>
+     <!-- Native select is kept for form semantics and script compatibility but hidden visually.
+       The custom dropdown will be created and inserted into #custom-difficulty-container. -->
+    <select id="difficulty-select" class="form-select form-select-sm small visually-hidden" style="align-self:center; width:110px;">
+       <option value="Easy">Easy</option>
+       <option value="Normal" selected>Normal</option>
+       <option value="Hard">Hard</option>
+     </select>
+     <div id="custom-difficulty-container" style="align-self:center;"></div>
+         <button id="difficulty-info" class="btn btn-outline-secondary small" title="Difficulty info" aria-label="Difficulty information" style="align-self:center;">?</button>
+         <button id="sfx-toggle" class="btn btn-outline-secondary small sfx-button" aria-pressed="false" title="Toggle sound effects" aria-label="Toggle sound effects">
+           <span class="sfx-icon" aria-hidden="true">
+             <!-- Inline SVG speaker with two wave paths for the animated effect -->
+             <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false">
+               <!-- speaker body -->
+               <path class="speaker-shape" d="M5 9v6h4l5 4V5L9 9H5z" />
+               <!-- sound waves (two arcs) -->
+               <path class="wave wave-1" d="M15.5 8.5c.9 1.2.9 2.8 0 4" fill="none" />
+               <path class="wave wave-2" d="M17.5 6.5c1.7 2.3 1.7 5.7 0 8" fill="none" />
+             </svg>
+           </span>
+           <span class="sfx-label">SFX</span>
+         </button>
+         <button id="pause-game" class="btn btn-warning small" aria-pressed="false">Pause</button>
+         <button id="restart-game" class="btn btn-outline-secondary small">Restart</button>
        </div>
     </div>
 
     <div id="achievements" class="achievement"></div>
     <div class="game-grid" role="grid" aria-label="game grid"></div>
 
+    <!-- Paused overlay (hidden when not paused) -->
+    <div id="pause-overlay" class="pause-overlay" aria-hidden="true">
+      <div class="pause-message">Paused</div>
+    </div>
+
     <div class="donation-row">
       <div class="donation-badge">0</div>
       <p class="donation-text">Every $40 can bring clean water to one person.</p>
       <div class="donation-details">Raised: $<span id="dollars">0</span></div>
       <div class="donation-total">All-time raised: $<span id="total-dollars">0</span></div>
-      <button id="reset-total" class="small">Reset all-time total</button>
+  <button id="reset-total" class="btn btn-outline-dark small">Reset all-time total</button>
+      <!-- Session milestone: prominent bar (session progress toward PEOPLE_THRESHOLD) -->
+      <div class="milestone milestone-session">
+        <div class="milestone-bar" aria-hidden="true">
+          <div class="milestone-fill" id="session-milestone-fill" style="width:0%"></div>
+        </div>
+        <div class="milestone-label" id="session-milestone-label">Session: $0 / $40</div>
+      </div>
+      <!-- All-time milestone: smaller bar showing cumulative progress toward next $100 -->
+      <div class="milestone milestone-alltime">
+        <div class="milestone-bar" aria-hidden="true">
+          <div class="milestone-fill" id="alltime-milestone-fill" style="width:0%"></div>
+        </div>
+        <div class="milestone-label" id="alltime-milestone-label" role="status" aria-live="polite" aria-atomic="true">All-time: $0 / $100</div>
+      </div>
     </div>
 
     <!-- Announcer for screen readers -->
     <div id="announcer" class="visually-hidden" aria-live="polite"></div>
+  <!-- Milestone announcer for screen readers (session progress) -->
+  <div id="milestone-announcer" class="visually-hidden" aria-live="polite" aria-atomic="true"></div>
 
     <footer class="brand-block">
       <div class="brand-name">charity: water</div>
+      <div class="brand-link">
+        <a id="donate-btn" class="btn btn-primary donate-btn" href="https://www.charitywater.org/?utm_source=adwords&utm_medium=paid-ppc&utm_campaign=spring-acq-usrow&utm_term=cBC_CW_G_PAID_SEARCH_BRAND_ALL_US+ROW_OBSV_ALL_PHRASE_ALL&utm_content=branded&gad_source=1&gad_campaignid=22148602074&gbraid=0AAAAADNj5D_mwH_00z7NoxCU24NpweaeQ&gclid=Cj0KCQjw9obIBhCAARIsAGHm1mSPod8kBaK_Lhj0oMUgaeddDuRzB56wx5LEG5q4kW96qq3vCi_3Q3YaAvyIEALw_wcB" target="_blank" rel="noopener noreferrer">Donate!</a>
+      </div>
     </footer>
     <!-- Victory modal -->
     <div id="victory-modal" class="modal" role="dialog" aria-modal="true" aria-hidden="true">
       <div class="modal-content">
         <h2>Congratulations!</h2>
         <p>You collected <span id="final-count">0</span> items and raised $<span id="final-dollars">0</span>.</p>
-        <button id="modal-restart">Play again</button>
+        <button id="modal-restart" class="btn btn-primary">Play again</button>
+      </div>
+    </div>
+
+    <!-- Difficulty info modal -->
+    <div id="difficulty-modal" class="modal" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="modal-content">
+        <h2>Difficulty Levels</h2>
+        <div class="difficulty-list">
+          <p><strong>Easy</strong> — Short goal, more time, slower spawns. Great for beginners.</p>
+          <p><strong>Normal</strong> — Balanced goal and time for a fun challenge.</p>
+          <p><strong>Hard</strong> — Higher goal, less time, faster spawns and more premium cans.</p>
+        </div>
+        <button id="difficulty-close" class="btn btn-secondary">Close</button>
       </div>
     </div>
   </div>

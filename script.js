@@ -1,5 +1,14 @@
 // Game configuration and state variables
-const GOAL_CANS = 20;        // Total items needed to collect
+// Difficulty presets — adjust goal, time, spawn speed (ms) and premium probability
+const DIFFICULTY_PRESETS = {
+  Easy: { goal: 12, time: 75, spawnMs: 1000, premiumProb: 0.08, hazardProb: 0.08 },
+  Normal: { goal: 20, time: 60, spawnMs: 900, premiumProb: 0.12, hazardProb: 0.12 },
+  Hard: { goal: 30, time: 45, spawnMs: 700, premiumProb: 0.18, hazardProb: 0.18 }
+};
+let selectedDifficulty = 'Normal';
+let currentGoal = DIFFICULTY_PRESETS[selectedDifficulty].goal;
+let currentSpawnMs = DIFFICULTY_PRESETS[selectedDifficulty].spawnMs;
+let currentPremiumProb = DIFFICULTY_PRESETS[selectedDifficulty].premiumProb;
 let currentCans = 0;         // Current number of items collected
 let gameActive = false;      // Tracks if game is currently running
 let spawnInterval;          // Holds the interval for spawning items
@@ -8,11 +17,45 @@ let timeLeft = 60;          // default time for the round (seconds)
 const STORAGE_KEY = 'waterQuest_total_dollars';
 let totalDollars = 0; // persisted all-time dollars
 let sessionDollars = 0; // dollars in current session
+let currentHazardProb = 0.06; // probability a spawned item is a hazard (set per-difficulty)
+// threshold for how many dollars = 1 person helped
+const PEOPLE_THRESHOLD = 40;
+// unit used for the all-time milestone visual (e.g. show progress toward next $100)
+const ALLTIME_MILESTONE_UNIT = 100;
+// storage key for all-time people helped (derived from totalDollars but persisted for convenience)
+const STORAGE_PEOPLE_KEY = 'waterQuest_people_helped';
+let peopleHelpedAllTime = 0;
+// storage keys for session-persisted values (so session state survives reloads)
+const STORAGE_SESSION_DOLLARS_KEY = 'waterQuest_session_dollars';
+const STORAGE_SESSION_PEOPLE_KEY = 'waterQuest_session_people';
+let peopleHelpedSession = 0;
+// SFX toggle persistence
+const STORAGE_SFX_KEY = 'waterQuest_sfx_enabled';
+let sfxEnabled = true;
+try {
+  const _raw = localStorage.getItem(STORAGE_SFX_KEY);
+  if (_raw !== null) sfxEnabled = (_raw === 'true');
+} catch (e) {}
+// accessibility: remember previous milestone state to avoid redundant announcements
+let prevMilestonePercent = -1;
+let prevAllTimePeopleHelped = -1;
+// Milestone messages: percentage thresholds (of currentGoal) and messages
+const MILESTONE_DEFS = [
+  { pct: 0.25, msg: "Good start — keep going!" },
+  { pct: 0.5,  msg: "Halfway there!" },
+  { pct: 0.75, msg: "You're nearly there!" }
+];
+// Computed per-game numeric thresholds and a set to remember which have fired
+let milestoneThresholds = [];
+let seenMilestones = new Set();
 // two can types: normal and premium
 const CAN_TYPES = {
   normal: { src: 'img/water-can-transparent.png', value: 1 },
   premium: { src: 'img/water-can.png', value: 5 } // fallback to existing image for premium
 };
+
+// Hazard visual/value (negative effect)
+const HAZARD = { value: 1 };
 
 // Creates the 3x3 game grid where items will appear
 function createGrid() {
@@ -32,6 +75,47 @@ function createGrid() {
 // Ensure the grid is created when the page loads
 createGrid();
 
+// Update the milestone/progress bar UI (session-based progress toward PEOPLE_THRESHOLD)
+function updateMilestoneBar() {
+  // Session milestone (prominent)
+  const sFill = document.getElementById('session-milestone-fill');
+  const sLabel = document.getElementById('session-milestone-label');
+  if (sFill && sLabel) {
+    const sd = Math.round(sessionDollars * 100) / 100;
+    const sProgress = Math.min(1, (sessionDollars % PEOPLE_THRESHOLD) / PEOPLE_THRESHOLD);
+    const sPercent = Math.round(sProgress * 100);
+    sFill.style.width = sPercent + '%';
+    sLabel.textContent = `Session: $${sd} / $${PEOPLE_THRESHOLD}`;
+  }
+
+  // All-time milestone (smaller) — shows progress toward next ALLTIME_MILESTONE_UNIT
+  const aFill = document.getElementById('alltime-milestone-fill');
+  const aLabel = document.getElementById('alltime-milestone-label');
+  if (aFill && aLabel) {
+    const td = Math.round(totalDollars * 100) / 100;
+    const unit = ALLTIME_MILESTONE_UNIT;
+    const aProgress = Math.min(1, (totalDollars % unit) / unit);
+    const aPercent = Math.round(aProgress * 100);
+    aFill.style.width = aPercent + '%';
+    aLabel.textContent = `All-time: $${td} / $${unit}`;
+
+    // announce all-time milestone changes to screen readers
+    try {
+      const announcer = document.getElementById('milestone-announcer');
+      const newPeople = Math.floor(totalDollars / PEOPLE_THRESHOLD);
+      if (announcer && (aPercent !== prevMilestonePercent || newPeople !== prevAllTimePeopleHelped)) {
+        const pctText = aPercent + '%';
+        const msg = `All-time progress: $${td} of $${unit} — ${pctText} toward the next milestone.` + (newPeople > prevAllTimePeopleHelped ? ` You've helped ${newPeople} people in total.` : '');
+        announcer.textContent = msg;
+        prevMilestonePercent = aPercent;
+        prevAllTimePeopleHelped = newPeople;
+      }
+    } catch (e) {
+      // ignore announcer errors
+    }
+  }
+}
+
 // load persisted total
 function loadTotal() {
   try {
@@ -42,6 +126,35 @@ function loadTotal() {
   }
   const el = document.getElementById('total-dollars');
   if (el) el.textContent = totalDollars;
+  // load persisted people helped if available, otherwise derive from total
+  try {
+    const rawPeople = localStorage.getItem(STORAGE_PEOPLE_KEY);
+    if (rawPeople !== null) {
+      peopleHelpedAllTime = parseInt(rawPeople, 10) || Math.floor(totalDollars / PEOPLE_THRESHOLD);
+    } else {
+      peopleHelpedAllTime = Math.floor(totalDollars / PEOPLE_THRESHOLD);
+      try { localStorage.setItem(STORAGE_PEOPLE_KEY, String(peopleHelpedAllTime)); } catch (e) {}
+    }
+  } catch (e) {
+    peopleHelpedAllTime = Math.floor(totalDollars / PEOPLE_THRESHOLD);
+  }
+  // load session-persisted dollars/people (if available) so a session survives reloads
+  try {
+  const rawSessD = sessionStorage.getItem(STORAGE_SESSION_DOLLARS_KEY);
+    sessionDollars = rawSessD !== null ? parseFloat(rawSessD) || 0 : 0;
+  const rawSessP = sessionStorage.getItem(STORAGE_SESSION_PEOPLE_KEY);
+    peopleHelpedSession = rawSessP !== null ? parseInt(rawSessP, 10) || Math.floor(sessionDollars / PEOPLE_THRESHOLD) : Math.floor(sessionDollars / PEOPLE_THRESHOLD);
+    // ensure session dollars storage exists (init)
+  try { sessionStorage.setItem(STORAGE_SESSION_DOLLARS_KEY, String(sessionDollars)); } catch (e) {}
+  try { sessionStorage.setItem(STORAGE_SESSION_PEOPLE_KEY, String(peopleHelpedSession)); } catch (e) {}
+  } catch (e) {
+    sessionDollars = 0; peopleHelpedSession = Math.floor(sessionDollars / PEOPLE_THRESHOLD);
+  }
+  // set UI values: session dollars and session people (badge)
+  const badge = document.querySelector('.donation-badge'); if (badge) badge.textContent = peopleHelpedSession;
+  const dollarsElSess = document.getElementById('dollars'); if (dollarsElSess) dollarsElSess.textContent = sessionDollars;
+  // update milestone bar UI
+  updateMilestoneBar();
 }
 loadTotal();
 
@@ -60,90 +173,301 @@ function spawnWaterCan() {
 
 
   // choose can type (premium rarer)
-  const isPremium = Math.random() < 0.12; // ~12% premium
-  const type = isPremium ? CAN_TYPES.premium : CAN_TYPES.normal;
-  randomCell.innerHTML = `
-    <div class="water-can-wrapper">
-      <img src="${type.src}" alt="water can" class="water-can ${isPremium ? 'premium' : 'normal'}" data-value="${type.value}" />
-    </div>`;
-  if (isPremium) {
-    const badge = document.createElement('div');
-    badge.className = 'premium-badge';
-    badge.textContent = '$' + type.value;
-    randomCell.appendChild(badge);
+  // decide whether to spawn a hazard instead of a can
+  if (Math.random() < currentHazardProb) {
+    // spawn a hazard (negative element)
+    randomCell.innerHTML = `
+      <div class="hazard-wrapper">
+        <div class="hazard" role="button" aria-label="hazard">✖</div>
+      </div>`;
+  } else {
+    const isPremium = Math.random() < currentPremiumProb;
+    const type = isPremium ? CAN_TYPES.premium : CAN_TYPES.normal;
+    randomCell.innerHTML = `
+      <div class="water-can-wrapper">
+        <img src="${type.src}" alt="water can" class="water-can ${isPremium ? 'premium' : 'normal'}" data-value="${type.value}" />
+      </div>`;
+    if (isPremium) {
+      const badge = document.createElement('div');
+      badge.className = 'premium-badge';
+      badge.textContent = '$' + type.value;
+      randomCell.appendChild(badge);
+    }
   }
 
-  // play a small spawn sound
-  playSound('spawn');
+  // play an appropriate spawn sound: hazard vs water can
+  if (randomCell.querySelector('.hazard')) {
+    try { playSound('hazard'); } catch (e) {}
+  } else {
+    try { playSound('water-drop'); } catch (e) {}
+  }
 }
 
 // Simple WebAudio manager for small sound cues
 const audioCtx = (window.AudioContext || window.webkitAudioContext) ? new (window.AudioContext || window.webkitAudioContext)() : null;
-function playSound(name) {
+
+// Cache for decoded audio buffers (so we don't repeatedly fetch/decode)
+const audioBuffers = {};
+// reference to the currently-playing water-drop source so we can stop it
+let currentWaterDrop = null;
+// reference to the last spawn sound (water-drop or hazard) to avoid overlap
+let currentSpawnSound = null;
+
+// Try to load and play a sample by URL. Resolves when playback starts.
+function playSample(url) {
+  if (!audioCtx) return Promise.reject(new Error('No AudioContext'));
+  console.debug && console.debug('playSample: attempting', url);
+  return new Promise((resolve, reject) => {
+    const startBufferPlayback = (buf) => {
+      try {
+        const src = audioCtx.createBufferSource();
+        src.buffer = buf;
+        const g = audioCtx.createGain();
+        // a reasonable default volume for samples
+        g.gain.setValueAtTime(0.08, audioCtx.currentTime);
+        src.connect(g);
+        g.connect(audioCtx.destination);
+        src.start();
+        // expose a small wrapper so callers can stop or fade the playback
+        const wrapper = {
+          node: src,
+          gain: g,
+          duration: (buf.duration || 0),
+          // immediate stop (with a very short fade to avoid clicks)
+          stop: () => {
+            try {
+              g.gain.cancelScheduledValues(audioCtx.currentTime);
+              g.gain.linearRampToValueAtTime(0.0001, audioCtx.currentTime + 0.05);
+              setTimeout(() => { try { src.stop(); } catch (e) {} }, 80);
+            } catch (e) {}
+          },
+          // gentle fade over `dur` seconds then stop
+          fade: (dur = 0.12) => {
+            try {
+              g.gain.cancelScheduledValues(audioCtx.currentTime);
+              g.gain.linearRampToValueAtTime(0.0001, audioCtx.currentTime + Math.max(0.03, dur));
+              setTimeout(() => { try { src.stop(); } catch (e) {} }, (Math.max(0.03, dur) * 1000) + 40);
+            } catch (e) {}
+          },
+          // placeholder hook that will be invoked when the source ends
+          onended: null
+        };
+        // propagate underlying node's ended event to wrapper.onended
+        src.onended = () => { try { if (typeof wrapper.onended === 'function') wrapper.onended(); } catch (e) {} };
+        resolve(wrapper);
+      } catch (err) {
+        reject(err);
+      }
+    };
+
+    if (audioBuffers[url]) {
+      startBufferPlayback(audioBuffers[url]);
+      return;
+    }
+
+    fetch(url).then(res => {
+      if (!res.ok) {
+        const err = new Error(`Sample not found (status ${res.status})`);
+        console.warn('playSample:', url, err);
+        throw err;
+      }
+      return res.arrayBuffer();
+    }).then(ab => {
+      // decodeAudioData may return a Promise or accept callbacks depending on browser
+      const decode = audioCtx.decodeAudioData(ab);
+      if (decode && typeof decode.then === 'function') {
+        return decode;
+      }
+      // older spec with callbacks
+      return new Promise((resDecode, rejDecode) => audioCtx.decodeAudioData(ab, resDecode, rejDecode));
+    }).then(buf => {
+      audioBuffers[url] = buf;
+      startBufferPlayback(buf);
+    }).catch(err => {
+      console.warn('playSample failed for', url, err);
+      reject(err);
+    });
+  });
+}
+
+// Fallback synth for water-drop when no sample is available
+function playWaterDropSynth() {
+  const now = audioCtx.currentTime;
+  const dur = 0.18;
+  // create a master gain so we can gracefully fade the whole synth
+  const master = audioCtx.createGain();
+  master.gain.setValueAtTime(1, now);
+  master.connect(audioCtx.destination);
+
+  // click (very short noise) for impact
+  const clickBuf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.03, audioCtx.sampleRate);
+  const data = clickBuf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+  const click = audioCtx.createBufferSource();
+  click.buffer = clickBuf;
+  const clickFilter = audioCtx.createBiquadFilter(); clickFilter.type = 'highpass'; clickFilter.frequency.setValueAtTime(900, now);
+  const clickGain = audioCtx.createGain(); clickGain.gain.setValueAtTime(0.008, now); clickGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
+  click.connect(clickFilter); clickFilter.connect(clickGain); clickGain.connect(master);
+  click.start(now); click.stop(now + 0.04);
+
+  // tone body
+  const tone = audioCtx.createOscillator();
+  tone.type = 'sine';
+  tone.frequency.setValueAtTime(880, now);
+  const toneG = audioCtx.createGain(); toneG.gain.setValueAtTime(0.02, now); toneG.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+  tone.connect(toneG);
+
+  // subtle delay to add body
+  const delay = audioCtx.createDelay(0.2);
+  delay.delayTime.setValueAtTime(0.03, now);
+  const delayGain = audioCtx.createGain(); delayGain.gain.setValueAtTime(0.25, now);
+
+  toneG.connect(master);
+  toneG.connect(delay); delay.connect(delayGain); delayGain.connect(master);
+
+  tone.start(now); tone.stop(now + dur);
+
+  // return an object that allows stopping or fading the synth
+  const wrapper = {
+    stop: () => {
+      try { click.stop(); } catch (e) {}
+      try { tone.stop(); } catch (e) {}
+      try { master.disconnect(); } catch (e) {}
+    },
+    fade: (fadeDur = 0.12) => {
+      try {
+        master.gain.cancelScheduledValues(audioCtx.currentTime);
+        master.gain.linearRampToValueAtTime(0.0001, audioCtx.currentTime + Math.max(0.03, fadeDur));
+        setTimeout(() => { try { click.stop(); } catch (e) {}; try { tone.stop(); } catch (e) {}; }, (Math.max(0.03, fadeDur) * 1000) + 40);
+      } catch (e) {}
+    },
+    duration: dur
+  };
+
+  return wrapper;
+}
+// Fallback synth for a hazard (negative) cue when no sample is available
+function playHazardSynth() {
   if (!audioCtx) return;
   const now = audioCtx.currentTime;
-  if (name === 'spawn') {
-    const o = audioCtx.createOscillator();
-    const g = audioCtx.createGain();
-    o.type = 'sine';
-    o.frequency.setValueAtTime(660, now);
-    g.gain.setValueAtTime(0.02, now);
-    o.connect(g); g.connect(audioCtx.destination);
-    o.start(now); o.stop(now + 0.06);
-  }
-  if (name === 'collect') {
-    // water-like splash: bandpass filtered noise burst with short pitch sweep and a stereo-delay for body
-    const dur = 0.45;
-    const noiseBuf = audioCtx.createBuffer(1, audioCtx.sampleRate * dur, audioCtx.sampleRate);
-    const out = noiseBuf.getChannelData(0);
-    for (let i = 0; i < out.length; i++) out[i] = (Math.random() * 2 - 1) * (1 - i / out.length);
-    const noiseSrc = audioCtx.createBufferSource();
-    noiseSrc.buffer = noiseBuf;
+  const dur = 0.18;
+  const master = audioCtx.createGain(); master.gain.setValueAtTime(0.9, now); master.connect(audioCtx.destination);
 
-    const band = audioCtx.createBiquadFilter();
-    band.type = 'bandpass';
-    band.frequency.setValueAtTime(900, now);
-    band.Q.setValueAtTime(1.6, now);
+  // low detuned saw for a brief buzzy 'wrong' cue
+  const o1 = audioCtx.createOscillator(); o1.type = 'sawtooth'; o1.frequency.setValueAtTime(220, now);
+  const o2 = audioCtx.createOscillator(); o2.type = 'sawtooth'; o2.frequency.setValueAtTime(260, now);
+  const mix = audioCtx.createGain(); mix.gain.setValueAtTime(0.0026, now);
+  o1.connect(mix); o2.connect(mix);
 
-    const noiseGain = audioCtx.createGain();
-    noiseGain.gain.setValueAtTime(0.0009, now);
-    noiseGain.gain.exponentialRampToValueAtTime(0.00001, now + dur);
+  // lowpass to roll off harsh highs
+  const lp = audioCtx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.setValueAtTime(900, now);
+  mix.connect(lp); lp.connect(master);
 
-    noiseSrc.connect(band); band.connect(noiseGain);
+  // slight amplitude envelope
+  const g = audioCtx.createGain(); g.gain.setValueAtTime(0.0001, now);
+  // connect mix through gain to master so envelope controls perceived volume
+  mix.disconnect(); mix.connect(g); g.connect(lp);
+  g.gain.setValueAtTime(0.0001, now);
+  g.gain.linearRampToValueAtTime(0.006, now + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
 
-    // short pitched element for the 'pop' edge
-    const tone = audioCtx.createOscillator();
-    tone.type = 'triangle';
-    tone.frequency.setValueAtTime(1200, now);
-    tone.frequency.exponentialRampToValueAtTime(480, now + dur * 0.9);
-    const toneG = audioCtx.createGain();
-    toneG.gain.setValueAtTime(0.02, now);
-    toneG.gain.exponentialRampToValueAtTime(0.0005, now + dur);
-    tone.connect(toneG);
+  o1.start(now); o2.start(now);
+  o1.stop(now + dur); o2.stop(now + dur);
 
-    // subtle delay to add body (create stereo-ish feel with FeedbackDelayNode fallback)
-    const delay = audioCtx.createDelay(0.2);
-    delay.delayTime.setValueAtTime(0.03, now);
-    const delayGain = audioCtx.createGain();
-    delayGain.gain.setValueAtTime(0.25, now);
+  const wrapper = {
+    stop: () => { try { o1.stop(); o2.stop(); } catch (e) {} },
+    fade: (fadeDur = 0.06) => { try { master.gain.cancelScheduledValues(audioCtx.currentTime); master.gain.linearRampToValueAtTime(0.0001, audioCtx.currentTime + fadeDur); } catch (e) {} },
+    duration: dur
+  };
+  return wrapper;
+}
+function playSound(name) {
+  if (!audioCtx) return;
+  if (!sfxEnabled) return; // SFX globally disabled
 
-    // mix paths to destination
-    noiseGain.connect(audioCtx.destination);
-    toneG.connect(audioCtx.destination);
-    // delayed tone for body
-    toneG.connect(delay); delay.connect(delayGain); delayGain.connect(audioCtx.destination);
+  // Ensure the AudioContext is resumed (some browsers start it suspended until a user gesture)
+  const runPlay = (playName) => {
+    const now = audioCtx.currentTime;
+    // removed legacy 'spawn' alias — use explicit 'water-drop' where needed
+    // prevent overlapping spawn/hazard sounds by stopping the previous spawn wrapper
+    if (playName === 'water-drop' || playName === 'hazard') {
+      if (currentSpawnSound) {
+        try {
+          if (typeof currentSpawnSound.fade === 'function') currentSpawnSound.fade(0.08);
+          else if (typeof currentSpawnSound.stop === 'function') currentSpawnSound.stop();
+        } catch (e) { /* ignore */ }
+      }
+    }
 
-    noiseSrc.start(now); noiseSrc.stop(now + dur);
-    tone.start(now); tone.stop(now + dur);
-  }
-  if (name === 'victory') {
-    const o = audioCtx.createOscillator();
-    const g = audioCtx.createGain();
-    o.type = 'sine';
-    o.frequency.setValueAtTime(1200, now);
-    g.gain.setValueAtTime(0.06, now);
-    o.connect(g); g.connect(audioCtx.destination);
-    o.start(now); o.stop(now + 0.22);
+    if (playName === 'water-drop') {
+      // prefer a recorded sample if present, otherwise play the synth fallback
+      playSample('sounds/water-drop-85731.mp3').then((obj) => {
+        // store wrapper so we can fade/stop it later
+        currentSpawnSound = obj;
+        currentWaterDrop = obj;
+        try { obj.onended = () => { if (currentSpawnSound === obj) currentSpawnSound = null; if (currentWaterDrop === obj) currentWaterDrop = null; }; } catch (e) {}
+      }).catch(() => {
+        // sample not available or failed to play — use synth fallback
+        const synth = playWaterDropSynth();
+        currentSpawnSound = synth;
+        currentWaterDrop = synth;
+        // clear reference after duration
+        setTimeout(() => { if (currentSpawnSound === synth) currentSpawnSound = null; if (currentWaterDrop === synth) currentWaterDrop = null; }, (synth.duration || 0.22) * 1000);
+      });
+    }
+    if (playName === 'victory') {
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.type = 'sine';
+      o.frequency.setValueAtTime(1200, now);
+      g.gain.setValueAtTime(0.06, now);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(now); o.stop(now + 0.22);
+    }
+    if (playName === 'water-drip-7') {
+      // play the provided water drip sample (actual file present in repo)
+      playSample('sounds/water-drip-7-39622.mp3').catch(() => {
+        // fallback to synth if sample missing or fails
+        playWaterDropSynth();
+      });
+    }
+    if (playName === 'hazard') {
+      // try a sample first (if you want to provide one at sounds/error-08-206492.mp3)
+      playSample('sounds/error-08-206492.mp3').then((obj) => {
+        currentSpawnSound = obj;
+        try { obj.onended = () => { if (currentSpawnSound === obj) currentSpawnSound = null; }; } catch (e) {}
+      }).catch(() => {
+        // fallback to a short low 'buzz' synth indicating a negative hit
+        const synth = playHazardSynth();
+        currentSpawnSound = synth;
+        setTimeout(() => { if (currentSpawnSound === synth) currentSpawnSound = null; }, (synth.duration || 0.22) * 1000);
+      });
+    }
+    if (playName === 'collect') {
+      // small bandpass noise + pitch glide (quick collect cue)
+      try {
+        const dur = 0.18;
+        const noiseBuf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.06, audioCtx.sampleRate);
+        const d = noiseBuf.getChannelData(0);
+        for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length);
+        const noiseSrc = audioCtx.createBufferSource(); noiseSrc.buffer = noiseBuf;
+        const bp = audioCtx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.setValueAtTime(1200, audioCtx.currentTime);
+        const ng = audioCtx.createGain(); ng.gain.setValueAtTime(0.02, audioCtx.currentTime); ng.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
+        noiseSrc.connect(bp); bp.connect(ng); ng.connect(audioCtx.destination);
+        noiseSrc.start(); noiseSrc.stop(audioCtx.currentTime + dur);
+      } catch (err) {
+        console.warn('collect synth failed', err);
+      }
+    }
+  };
+
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume().then(() => runPlay(name)).catch((err) => {
+      console.warn('AudioContext resume failed, attempting to play anyway', err);
+      runPlay(name);
+    });
+  } else {
+    runPlay(name);
   }
 }
 
@@ -165,26 +489,47 @@ function collectCan(target) {
   const currentEl = document.getElementById('current-cans');
   if (currentEl) currentEl.textContent = currentCans;
 
+  // Check milestone messages (allow multiple milestones to fire if a single collect crosses several)
+  try {
+    const achiever = document.getElementById('achievements');
+    const announcerEl = document.getElementById('announcer');
+    for (let i = 0; i < milestoneThresholds.length; i++) {
+      const thr = milestoneThresholds[i];
+      if (thr <= 0) continue;
+      if (currentCans >= thr && !seenMilestones.has(thr)) {
+        seenMilestones.add(thr);
+        const msg = (MILESTONE_DEFS[i] && MILESTONE_DEFS[i].msg) ? MILESTONE_DEFS[i].msg : `Milestone reached: ${thr}`;
+        // announce to screen readers
+        if (announcerEl) announcerEl.textContent = msg;
+        // show a brief visual achievement toast (non-blocking)
+        if (achiever) {
+          const el = document.createElement('div');
+          el.className = 'milestone-message';
+          el.textContent = msg;
+          // basic styling fallback if CSS not present
+          el.style.background = 'rgba(46,157,247,0.95)';
+          el.style.color = '#fff';
+          el.style.padding = '8px 12px';
+          el.style.borderRadius = '8px';
+          el.style.fontWeight = '700';
+          el.style.margin = '6px auto';
+          el.style.textAlign = 'center';
+          achiever.appendChild(el);
+          setTimeout(() => { try { el.remove(); } catch (e) {} }, 1600);
+        }
+      }
+    }
+  } catch (e) { /* non-fatal */ }
+
   // determine clicked can's value (data-value on the image)
   // determine clicked can's value (prefer dataset)
   const rawVal = (imgEl.dataset && imgEl.dataset.value) || imgEl.getAttribute && imgEl.getAttribute('data-value');
   const clickedValue = Number(rawVal) || 1;
 
-  // compute previous people helped and update session dollars
-  const prevPeople = Math.floor(sessionDollars / 40);
+  // update session dollars and UI
   sessionDollars = Math.round((sessionDollars + clickedValue) * 100) / 100;
   const dollarsEl = document.getElementById('dollars');
   if (dollarsEl) dollarsEl.textContent = sessionDollars;
-
-  // update the donation badge only if we've crossed the next $40 threshold
-  const newPeople = Math.floor(sessionDollars / 40);
-  if (newPeople > prevPeople) {
-    updateBadge(newPeople);
-  } else {
-    // keep the badge number accurate without re-triggering the pop animation
-    const badge = document.querySelector('.donation-badge');
-    if (badge) badge.textContent = newPeople;
-  }
 
   // persist to all-time total using clicked value
   const addValue = clickedValue || 1;
@@ -194,12 +539,48 @@ function collectCan(target) {
   const totalEl = document.getElementById('total-dollars');
   if (totalEl) totalEl.textContent = totalDollars;
 
+  // recompute all-time people helped based on updated total and persist
+  // update session-persisted people helped based on sessionDollars and persist
+  try {
+    const prevSess = peopleHelpedSession || 0;
+    const newSess = Math.floor(sessionDollars / PEOPLE_THRESHOLD);
+    const badge = document.querySelector('.donation-badge');
+    if (newSess > prevSess) {
+      const delta = newSess - prevSess;
+      const start = prevSess;
+      // persist the new session values
+      peopleHelpedSession = newSess;
+  try { sessionStorage.setItem(STORAGE_SESSION_PEOPLE_KEY, String(peopleHelpedSession)); } catch (e) {}
+  try { sessionStorage.setItem(STORAGE_SESSION_DOLLARS_KEY, String(sessionDollars)); } catch (e) {}
+      if (badge) {
+        for (let i = 1; i <= delta; i++) {
+          setTimeout(() => {
+            const val = start + i;
+            badge.textContent = val;
+            badge.classList.remove('pop');
+            void badge.offsetWidth;
+            badge.classList.add('pop');
+          }, i * 160);
+        }
+      }
+    } else {
+      // keep badge showing current session value
+      peopleHelpedSession = newSess;
+  try { sessionStorage.setItem(STORAGE_SESSION_PEOPLE_KEY, String(peopleHelpedSession)); } catch (e) {}
+  try { sessionStorage.setItem(STORAGE_SESSION_DOLLARS_KEY, String(sessionDollars)); } catch (e) {}
+      if (badge) badge.textContent = peopleHelpedSession;
+    }
+  } catch (e) {}
+
+  // refresh milestone bar (session progress)
+  try { updateMilestoneBar(); } catch (e) {}
+
   // announce to screen readers
   const announcer = document.getElementById('announcer');
   if (announcer) announcer.textContent = `Collected! Score ${currentCans}`;
 
-  // play collect sound
-  playSound('collect');
+  // play requested click sound
+  playSound('water-drip-7');
 
   // show a brief +1 float animation and splash/pop visuals
   if (cell) {
@@ -229,8 +610,8 @@ function collectCan(target) {
         </svg>`;
       cell.appendChild(ripple);
 
-    // try to play a recorded splash file if present, otherwise fallback to synth
-    playRecordedSplash().catch(() => playSound('collect'));
+  // try to play a recorded splash file if present, otherwise fallback to the water-drip-7 sound
+  playRecordedSplash().catch(() => playSound('water-drip-7'));
 
     // cleanup after animations complete
     setTimeout(() => {
@@ -242,9 +623,58 @@ function collectCan(target) {
   }
 
   // If we've reached the goal, show victory
-  if (currentCans >= GOAL_CANS) {
+  if (currentCans >= currentGoal) {
     showVictory();
   }
+}
+
+// Handle when a hazard is clicked — reduce score/dollars
+function hitHazard(target) {
+  let el = target;
+  if (!el || !el.classList || !el.classList.contains('hazard')) {
+    el = target.closest && target.closest('.hazard');
+  }
+  if (!el) return;
+  const cell = el.closest('.grid-cell');
+
+  // decrement collected cans (but don't go below zero)
+  currentCans = Math.max(0, currentCans - 1);
+  const currentEl = document.getElementById('current-cans'); if (currentEl) currentEl.textContent = currentCans;
+
+  // decrement session dollars by hazard value and persist
+  sessionDollars = Math.max(0, Math.round((sessionDollars - HAZARD.value) * 100) / 100);
+  const dollarsEl = document.getElementById('dollars'); if (dollarsEl) dollarsEl.textContent = sessionDollars;
+  try { sessionStorage.setItem(STORAGE_SESSION_DOLLARS_KEY, String(sessionDollars)); } catch (e) {}
+
+  // recompute session people helped and update badge (no pop animation for removal)
+  try {
+    const newSess = Math.floor(sessionDollars / PEOPLE_THRESHOLD);
+    peopleHelpedSession = newSess;
+    try { sessionStorage.setItem(STORAGE_SESSION_PEOPLE_KEY, String(peopleHelpedSession)); } catch (e) {}
+    const badge = document.querySelector('.donation-badge'); if (badge) badge.textContent = peopleHelpedSession;
+  } catch (e) {}
+
+  // show negative float and subtle visual cue
+  if (cell) {
+    const minus = document.createElement('div');
+    minus.className = 'float-plus';
+    minus.style.color = '#F54E4E';
+    minus.textContent = '-1';
+    cell.appendChild(minus);
+    // add a brief hazard flash
+    el.classList.add('hit');
+    setTimeout(() => { try { el.classList.remove('hit'); } catch (e) {} }, 380);
+    setTimeout(() => { try { minus.remove(); } catch (e) {} }, 720);
+  }
+
+  // update milestone UI after penalty
+  try { updateMilestoneBar(); } catch (e) {}
+
+  // play an optional negative cue (reusing collect synth as fallback)
+  try { playSound('hazard'); } catch (e) {}
+
+  // remove hazard element after effect
+  try { const wrapper = el.closest('.hazard-wrapper'); if (wrapper) wrapper.remove(); } catch (e) {}
 }
 
 // animate and update donation badge
@@ -261,9 +691,11 @@ function updateBadge(value) {
 }
 
 // Start the countdown timer
-function startTimer() {
-  timeLeft = 60;
+// Start the countdown timer (optional initialTime overrides current timeLeft)
+function startTimer(initialTime) {
+  timeLeft = (typeof initialTime === 'number') ? initialTime : timeLeft;
   document.getElementById('timer').textContent = timeLeft;
+  clearInterval(countdownInterval);
   countdownInterval = setInterval(() => {
     timeLeft -= 1;
     document.getElementById('timer').textContent = timeLeft;
@@ -278,10 +710,27 @@ function startTimer() {
 // Initializes and starts a new game
 function startGame() {
   if (gameActive) return; // Prevent starting a new game if one is already active
+  // read selected difficulty and apply presets
+  const sel = document.getElementById('difficulty-select');
+  selectedDifficulty = sel ? sel.value : selectedDifficulty;
+  const preset = DIFFICULTY_PRESETS[selectedDifficulty] || DIFFICULTY_PRESETS.Normal;
+  currentGoal = preset.goal;
+  currentSpawnMs = preset.spawnMs;
+  currentPremiumProb = preset.premiumProb;
+  currentHazardProb = typeof preset.hazardProb === 'number' ? preset.hazardProb : currentHazardProb;
+  timeLeft = preset.time;
+
+  // compute numeric milestone thresholds for this game's goal and reset seen flags
+  milestoneThresholds = MILESTONE_DEFS.map(d => Math.max(1, Math.floor(currentGoal * d.pct)));
+  seenMilestones = new Set();
+
   gameActive = true;
   createGrid(); // Set up the game grid
-  spawnInterval = setInterval(spawnWaterCan, 900); // spawn every 900ms for snappier play
-  startTimer();
+  // disable difficulty selector during an active game
+  const ds = document.getElementById('difficulty-select'); if (ds) ds.disabled = true;
+  clearInterval(spawnInterval);
+  spawnInterval = setInterval(spawnWaterCan, currentSpawnMs);
+  startTimer(timeLeft);
   // Update CTA to indicate running state
   const btn = document.getElementById('start-game');
   if (btn) btn.textContent = 'Keep going!';
@@ -289,6 +738,8 @@ function startGame() {
 
 function endGame() {
   gameActive = false; // Mark the game as inactive
+  // re-enable difficulty selector when the game ends
+  const ds = document.getElementById('difficulty-select'); if (ds) ds.disabled = false;
   clearInterval(spawnInterval); // Stop spawning water cans
   clearInterval(countdownInterval);
   // Change CTA to allow restart
@@ -312,6 +763,26 @@ function pauseGame() {
   // update UI
   const pBtn = document.getElementById('pause-game');
   if (pBtn) { pBtn.textContent = 'Resume'; pBtn.setAttribute('aria-pressed', 'true'); }
+
+  // dim the grid and show overlay
+  const grid = document.querySelector('.game-grid');
+  if (grid) grid.classList.add('dimmed');
+  const overlay = document.getElementById('pause-overlay');
+  if (overlay) overlay.setAttribute('aria-hidden', 'false');
+
+  // gently fade any currently-playing water-drop audio
+  try {
+    if (currentWaterDrop) {
+      if (typeof currentWaterDrop.fade === 'function') currentWaterDrop.fade(0.12);
+      else if (typeof currentWaterDrop.stop === 'function') currentWaterDrop.stop();
+      // don't clear the ref immediately; let the wrapper clear itself on ended or after duration
+    }
+    // also fade/stop any spawn/hazard sound reference
+    if (currentSpawnSound && currentSpawnSound !== currentWaterDrop) {
+      if (typeof currentSpawnSound.fade === 'function') currentSpawnSound.fade(0.12);
+      else if (typeof currentSpawnSound.stop === 'function') currentSpawnSound.stop();
+    }
+  } catch (e) {}
 }
 
 function resumeGame() {
@@ -322,7 +793,7 @@ function resumeGame() {
   const tEl = document.getElementById('timer');
   if (tEl) tEl.textContent = timeLeft;
   // restart intervals
-  spawnInterval = setInterval(spawnWaterCan, 900);
+  spawnInterval = setInterval(spawnWaterCan, currentSpawnMs);
   countdownInterval = setInterval(() => {
     timeLeft -= 1;
     const te = document.getElementById('timer'); if (te) te.textContent = timeLeft;
@@ -330,6 +801,12 @@ function resumeGame() {
   }, 1000);
   const pBtn = document.getElementById('pause-game');
   if (pBtn) { pBtn.textContent = 'Pause'; pBtn.setAttribute('aria-pressed', 'false'); }
+
+  // remove dimming and hide overlay
+  const grid = document.querySelector('.game-grid');
+  if (grid) grid.classList.remove('dimmed');
+  const overlay = document.getElementById('pause-overlay');
+  if (overlay) overlay.setAttribute('aria-hidden', 'true');
 }
 
 function restartGame() {
@@ -339,7 +816,7 @@ function restartGame() {
   paused = false;
   gameActive = false;
   // reset session state
-  currentCans = 0; sessionDollars = 0; timeLeft = 60; remainingTimeWhenPaused = null;
+  currentCans = 0; sessionDollars = 0; remainingTimeWhenPaused = null;
   // update UI
   const currentEl = document.getElementById('current-cans'); if (currentEl) currentEl.textContent = currentCans;
   const dollarsEl = document.getElementById('dollars'); if (dollarsEl) dollarsEl.textContent = sessionDollars;
@@ -371,117 +848,18 @@ function hideVictory() {
 function resetGame() {
   currentCans = 0;
   document.getElementById('current-cans').textContent = currentCans;
-  updateBadge(0);
+  // reset session-persisted values (badge shows session people helped)
   sessionDollars = 0;
+  peopleHelpedSession = 0;
+  try { sessionStorage.removeItem(STORAGE_SESSION_DOLLARS_KEY); } catch (e) {}
+  try { sessionStorage.removeItem(STORAGE_SESSION_PEOPLE_KEY); } catch (e) {}
+  updateBadge(0);
   document.getElementById('dollars').textContent = '0';
+  try { updateMilestoneBar(); } catch (e) {}
   document.getElementById('timer').textContent = '60';
   hideVictory();
 }
 
-// Try to play a recorded splash file (returns a promise). If not available, reject so caller can fallback.
-async function playRecordedSplash() {
-  // Try to play a static file first; if missing, generate a short recorded-style splash using OfflineAudioContext
-  try {
-    const audio = new Audio('sounds/splash.mp3');
-    audio.volume = 0.9;
-    await new Promise((resolve, reject) => {
-      // If file can't be loaded or play fails, reject so we can fallback
-      audio.addEventListener('canplaythrough', () => {
-        audio.play().then(resolve).catch(reject);
-      });
-      audio.addEventListener('error', () => reject(new Error('splash audio missing')));
-    });
-    return;
-  } catch (err) {
-    // fallback: synthesize a short recorded-style splash using OfflineAudioContext
-  }
-
-  // create a short sampled splash (noise burst + short pitch) and play it
-  try {
-    const sampleRate = 44100;
-    const duration = 0.5; // a little longer for a fuller splash
-    const offline = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, sampleRate * duration, sampleRate);
-
-    // prepare bandpass filtered noise
-    const noiseBuffer = offline.createBuffer(1, sampleRate * duration, sampleRate);
-    const data = noiseBuffer.getChannelData(0);
-    for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
-    const noiseSrc = offline.createBufferSource();
-    noiseSrc.buffer = noiseBuffer;
-    const band = offline.createBiquadFilter();
-    band.type = 'bandpass';
-    band.frequency.value = 900;
-    band.Q.value = 1.6;
-    const ng = offline.createGain(); ng.gain.value = 0.8; ng.gain.exponentialRampToValueAtTime(0.0001, duration);
-    noiseSrc.connect(band); band.connect(ng); ng.connect(offline.destination);
-    noiseSrc.start(0);
-
-    // pitched body
-    const tone = offline.createOscillator();
-    tone.type = 'triangle';
-    tone.frequency.setValueAtTime(1200, 0);
-    tone.frequency.linearRampToValueAtTime(480, duration * 0.9);
-    const tg = offline.createGain(); tg.gain.setValueAtTime(0.03, 0); tg.gain.exponentialRampToValueAtTime(0.0005, duration);
-    tone.connect(tg); tg.connect(offline.destination);
-    tone.start(0);
-
-    const rendered = await offline.startRendering();
-
-    // encode to WAV and play via blob URL
-    const wavBlob = encodeWAV(rendered);
-    const url = URL.createObjectURL(wavBlob);
-    await new Promise((resolve, reject) => {
-      const a = new Audio(url);
-      a.volume = 0.9;
-      a.addEventListener('ended', () => { URL.revokeObjectURL(url); resolve(); });
-      a.addEventListener('error', (e) => { URL.revokeObjectURL(url); reject(e); });
-      a.play().then(() => {}).catch(reject);
-    });
-    return;
-  } catch (err) {
-    // if anything fails, fall back to the synth pop
-    return Promise.reject(err);
-  }
-}
-
-// Encode an AudioBuffer into a WAV Blob (16-bit PCM)
-function encodeWAV(audioBuffer) {
-  const numChannels = audioBuffer.numberOfChannels;
-  const sampleRate = audioBuffer.sampleRate;
-  const samples = audioBuffer.getChannelData(0);
-  // convert to 16-bit PCM
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-
-  /* RIFF identifier */ writeString(view, 0, 'RIFF');
-  /* file length */ view.setUint32(4, 36 + samples.length * 2, true);
-  /* RIFF type */ writeString(view, 8, 'WAVE');
-  /* format chunk identifier */ writeString(view, 12, 'fmt ');
-  /* format chunk length */ view.setUint32(16, 16, true);
-  /* sample format (raw) */ view.setUint16(20, 1, true);
-  /* channel count */ view.setUint16(22, numChannels, true);
-  /* sample rate */ view.setUint32(24, sampleRate, true);
-  /* byte rate (sample rate * block align) */ view.setUint32(28, sampleRate * numChannels * 2, true);
-  /* block align (channel count * bytes per sample) */ view.setUint16(32, numChannels * 2, true);
-  /* bits per sample */ view.setUint16(34, 16, true);
-  /* data chunk identifier */ writeString(view, 36, 'data');
-  /* data chunk length */ view.setUint32(40, samples.length * 2, true);
-
-  // write PCM samples
-  let offset = 44;
-  for (let i = 0; i < samples.length; i++, offset += 2) {
-    let s = Math.max(-1, Math.min(1, samples[i]));
-    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
-  }
-
-  return new Blob([view], { type: 'audio/wav' });
-}
-
-function writeString(view, offset, string) {
-  for (let i = 0; i < string.length; i++) {
-    view.setUint8(offset + i, string.charCodeAt(i));
-  }
-}
 
 // Set up click handler for the start button
 document.getElementById('start-game').addEventListener('click', () => {
@@ -511,9 +889,11 @@ if (restartBtn) {
 
 // Delegate clicks inside the grid to handle collecting cans
 document.querySelector('.game-grid').addEventListener('click', (e) => {
-  if (!gameActive) return;
+  if (!gameActive || paused) return;
   const can = e.target.closest('.water-can');
-  if (can) collectCan(can);
+  if (can) { collectCan(can); return; }
+  const hazard = e.target.closest('.hazard');
+  if (hazard) { hitHazard(hazard); return; }
 });
 
 // modal restart button
@@ -524,14 +904,180 @@ if (modalRestart) modalRestart.addEventListener('click', () => {
   startGame();
 });
 
+// Difficulty info modal wiring
+const diffInfoBtn = document.getElementById('difficulty-info');
+const diffModal = document.getElementById('difficulty-modal');
+const diffClose = document.getElementById('difficulty-close');
+if (diffInfoBtn && diffModal) {
+  diffInfoBtn.addEventListener('click', () => {
+    diffModal.setAttribute('aria-hidden', 'false');
+  });
+}
+if (diffClose && diffModal) {
+  diffClose.addEventListener('click', () => {
+    diffModal.setAttribute('aria-hidden', 'true');
+  });
+}
+// close with ESC
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (diffModal && diffModal.getAttribute('aria-hidden') === 'false') diffModal.setAttribute('aria-hidden', 'true');
+  }
+});
+
+/* --- Custom difficulty dropdown: replace native select visually while keeping it for
+      script compatibility and a11y. The custom control shows options and a description
+      block beneath it. */
+function initCustomDifficulty() {
+  const native = document.getElementById('difficulty-select');
+  const container = document.getElementById('custom-difficulty-container');
+  if (!native || !container) return;
+
+  // Build wrapper
+  const wrapper = document.createElement('div');
+  wrapper.className = 'custom-select';
+  wrapper.setAttribute('role', 'combobox');
+  wrapper.setAttribute('aria-haspopup', 'listbox');
+  wrapper.setAttribute('aria-expanded', 'false');
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'custom-select-button';
+  btn.id = 'custom-difficulty-button';
+  btn.setAttribute('aria-labelledby', 'custom-difficulty-button');
+  btn.textContent = native.value || native.options[native.selectedIndex].text || 'Normal';
+  const caret = document.createElement('span'); caret.className = 'caret'; caret.textContent = ' ▾';
+  btn.appendChild(caret);
+  wrapper.appendChild(btn);
+
+  const list = document.createElement('div');
+  list.className = 'custom-options';
+  list.setAttribute('role', 'listbox');
+
+  // create options from native select
+  Array.from(native.options).forEach((opt) => {
+    const item = document.createElement('div');
+    item.className = 'custom-option';
+    item.setAttribute('role', 'option');
+    item.setAttribute('data-value', opt.value);
+    item.textContent = opt.textContent;
+    if (opt.selected) item.setAttribute('aria-selected', 'true'); else item.setAttribute('aria-selected', 'false');
+    item.addEventListener('click', () => {
+      // update native select and fire change
+      native.value = opt.value;
+      const ev = new Event('change', { bubbles: true });
+      native.dispatchEvent(ev);
+      // update visuals
+      btn.firstChild && (btn.firstChild.textContent = '');
+      btn.childNodes[0].nodeValue = opt.textContent; // set primary text
+      Array.from(list.querySelectorAll('.custom-option')).forEach(o => o.setAttribute('aria-selected', 'false'));
+      item.setAttribute('aria-selected', 'true');
+      hideCustom();
+    }, { passive: true });
+    list.appendChild(item);
+  });
+
+  wrapper.appendChild(list);
+
+  // (no inline description block — keep the modal content in `#difficulty-modal` only)
+
+  container.appendChild(wrapper);
+
+  // open/close helpers
+  function showCustom() { wrapper.classList.add('open'); wrapper.setAttribute('aria-expanded', 'true'); }
+  function hideCustom() { wrapper.classList.remove('open'); wrapper.setAttribute('aria-expanded', 'false'); }
+  function toggleCustom() { wrapper.classList.contains('open') ? hideCustom() : showCustom(); }
+
+  // wire button
+  btn.addEventListener('click', (e) => { e.stopPropagation(); toggleCustom(); });
+  btn.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); showCustom(); const first = list.querySelector('[role="option"]'); if (first) first.focus(); }
+    if (e.key === 'Escape') hideCustom();
+  });
+
+  // close on outside click
+  document.addEventListener('pointerdown', (ev) => {
+    if (!wrapper.contains(ev.target)) hideCustom();
+  });
+
+  // keyboard navigation within options
+  list.addEventListener('keydown', (e) => {
+    const items = Array.from(list.querySelectorAll('[role="option"]'));
+    const idx = items.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') { e.preventDefault(); const next = items[Math.min(items.length - 1, Math.max(0, idx + 1))]; if (next) next.focus(); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); const prev = items[Math.max(0, idx - 1)]; if (prev) prev.focus(); }
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); document.activeElement.click(); }
+    if (e.key === 'Escape') { e.preventDefault(); hideCustom(); btn.focus(); }
+  });
+
+  // expose hide for internal usage
+  function hideCustomImmediate() { hideCustom(); }
+  // attach to global so other code can call if needed
+  window.hideCustomDifficulty = hideCustomImmediate;
+}
+
+// initialize once DOM is ready (script is at page bottom, safe to call)
+try { initCustomDifficulty(); } catch (e) { /* non-fatal */ }
+
+// Difficulty selector change: adjust presets (and adapt running game timing)
+const diffSelect = document.getElementById('difficulty-select');
+if (diffSelect) {
+  diffSelect.addEventListener('change', (e) => {
+    // prevent changing difficulty while a game is in progress
+    if (gameActive) {
+      // revert selection to the active difficulty
+      e.target.value = selectedDifficulty;
+      return;
+    }
+    const newVal = e.target.value;
+    const oldPreset = DIFFICULTY_PRESETS[selectedDifficulty] || DIFFICULTY_PRESETS.Normal;
+    const newPreset = DIFFICULTY_PRESETS[newVal] || DIFFICULTY_PRESETS.Normal;
+    // update selected and current settings
+    selectedDifficulty = newVal;
+    currentGoal = newPreset.goal;
+    currentPremiumProb = newPreset.premiumProb;
+
+    // adjust spawn cadence immediately
+    currentSpawnMs = newPreset.spawnMs;
+    if (spawnInterval) {
+      clearInterval(spawnInterval);
+      spawnInterval = setInterval(spawnWaterCan, currentSpawnMs);
+    }
+
+    // When difficulty changes, reset the remaining time to the preset time
+    if (gameActive) {
+      if (paused) {
+        // if paused, update the stored paused remaining time to the new preset
+        remainingTimeWhenPaused = newPreset.time;
+      } else {
+        // actively running: set timeLeft to new preset and restart countdown
+        timeLeft = newPreset.time;
+        const tEl = document.getElementById('timer'); if (tEl) tEl.textContent = timeLeft;
+        clearInterval(countdownInterval);
+        countdownInterval = setInterval(() => {
+          timeLeft -= 1;
+          const te = document.getElementById('timer'); if (te) te.textContent = timeLeft;
+          if (timeLeft <= 0) { endGame(); showVictory(); }
+        }, 1000);
+      }
+    } else {
+      // if game not active, set the displayed timer to the preset for clarity
+      timeLeft = newPreset.time;
+      const tEl = document.getElementById('timer'); if (tEl) tEl.textContent = timeLeft;
+    }
+  });
+}
+
 // keyboard accessibility: allow Enter/Space to collect when focused on a cell
 document.addEventListener('keydown', (e) => {
-  if (!gameActive) return;
+  if (!gameActive || paused) return;
   if (e.key === 'Enter' || e.key === ' ') {
     const active = document.activeElement;
     if (active && active.classList.contains('grid-cell')) {
       const can = active.querySelector('.water-can');
-      if (can) collectCan(can);
+      if (can) { collectCan(can); return; }
+      const hazard = active.querySelector('.hazard');
+      if (hazard) { hitHazard(hazard); return; }
     }
   }
 });
@@ -544,5 +1090,53 @@ if (resetBtn) {
     try { localStorage.removeItem(STORAGE_KEY); totalDollars = 0; } catch (err) {}
     const totalEl = document.getElementById('total-dollars');
     if (totalEl) totalEl.textContent = totalDollars;
+  });
+}
+
+// SFX toggle button wiring
+const sfxBtn = document.getElementById('sfx-toggle');
+function updateSfxButton() {
+  if (!sfxBtn) return;
+  sfxBtn.setAttribute('aria-pressed', sfxEnabled ? 'true' : 'false');
+  // update only the label so we don't clobber the icon element
+  const lbl = sfxBtn.querySelector('.sfx-label');
+  if (lbl) lbl.textContent = sfxEnabled ? 'SFX On' : 'SFX Off';
+  // visual state classes for animation
+  if (sfxEnabled) {
+    sfxBtn.classList.remove('btn-outline-secondary');
+    sfxBtn.classList.add('btn-primary');
+    sfxBtn.classList.add('sfx-on');
+    sfxBtn.classList.remove('sfx-off');
+  } else {
+    sfxBtn.classList.remove('btn-primary');
+    sfxBtn.classList.add('btn-outline-secondary');
+    sfxBtn.classList.add('sfx-off');
+    sfxBtn.classList.remove('sfx-on');
+  }
+}
+
+function setSfxEnabled(enabled) {
+  sfxEnabled = !!enabled;
+  try { localStorage.setItem(STORAGE_SFX_KEY, String(sfxEnabled)); } catch (e) {}
+  updateSfxButton();
+  // fade/stop any playing sounds when turning off
+  if (!sfxEnabled) {
+    try {
+      if (currentWaterDrop) {
+        if (typeof currentWaterDrop.fade === 'function') currentWaterDrop.fade(0.06);
+        else if (typeof currentWaterDrop.stop === 'function') currentWaterDrop.stop();
+      }
+      if (currentSpawnSound && currentSpawnSound !== currentWaterDrop) {
+        if (typeof currentSpawnSound.fade === 'function') currentSpawnSound.fade(0.06);
+        else if (typeof currentSpawnSound.stop === 'function') currentSpawnSound.stop();
+      }
+    } catch (e) {}
+  }
+}
+
+if (sfxBtn) {
+  updateSfxButton();
+  sfxBtn.addEventListener('click', () => {
+    setSfxEnabled(!sfxEnabled);
   });
 }
